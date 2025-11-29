@@ -7,7 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 #include "cnn.h"
+
+#include <omp.h>
 
 #define DEBUG_LAYER 0
 
@@ -64,6 +67,16 @@ static inline double relu_g(double y)
     return (0 < y)? 1 : 0;
 }
 
+/* ---- profiling data (for manual timing) ---- */
+static double prof_feedforw_full_time = 0.0;
+static double prof_feedforw_conv_time = 0.0;
+static double prof_feedback_full_time = 0.0;
+static double prof_feedback_conv_time = 0.0;
+
+static long prof_feedforw_full_calls = 0;
+static long prof_feedforw_conv_calls = 0;
+static long prof_feedback_full_calls = 0;
+static long prof_feedback_conv_calls = 0;
 
 /*  Layer
  */
@@ -205,42 +218,49 @@ void Layer_dump(const Layer* self, FILE* fp)
 */
 static void Layer_feedForw_full(Layer* self)
 {
+    clock_t t0 = clock();  // <-- start timing
+
     assert (self->ltype == LAYER_FULL);
     assert (self->lprev != NULL);
     Layer* lprev = self->lprev;
 
-    int k = 0;
-    for (int i = 0; i < self->nnodes; i++) {
+    const int out_size = self->nnodes;//輸出node個數
+    const int in_size = lprev->nnodes;//輸入node個數
+
+    for (int i = 0; i < out_size; i++) {
         /* Compute Y = (W * X + B) without activation function. */
-        double x = self->biases[i];
-        for (int j = 0; j < lprev->nnodes; j++) {
-            x += (lprev->outputs[j] * self->weights[k++]);
+        double sum = self->biases[i];
+        const int w_base = i * in_size;//把原本攤平的m*n矩陣弄回去
+        for (int j = 0; j < in_size; j++) {
+            sum += (lprev->outputs[j] * self->weights[w_base + j]);
         }
-        self->outputs[i] = x;
+        self->outputs[i] = sum;
     }
 
     if (self->lnext == NULL) {
         /* Last layer - use Softmax. */
-        double m = -1;
-        for (int i = 0; i < self->nnodes; i++) {
+        double m = -INFINITY;//如果logits比-1小，這邊設-1會使得最小值cap在-1而使模型無法收斂
+        for (int i = 0; i < out_size; i++) {
             double x = self->outputs[i];
-            if (m < x) { m = x; }
+            if (m < x){ 
+                m = x;
+            }
         }
-        double t = 0;
-        for (int i = 0; i < self->nnodes; i++) {
+        double t = 0.0;
+        for (int i = 0; i < out_size; i++) {
             double x = self->outputs[i];
             double y = exp(x-m);
             self->outputs[i] = y;
             t += y;
         }
-        for (int i = 0; i < self->nnodes; i++) {
+        for (int i = 0; i < out_size; i++) {
             self->outputs[i] /= t;
             /* This isn't right, but set the same value to all the gradients. */
             self->gradients[i] = 1;
         }
     } else {
         /* Otherwise, use Tanh. */
-        for (int i = 0; i < self->nnodes; i++) {
+        for (int i = 0; i < out_size; i++) {
             double x = self->outputs[i];
             double y = tanh(x);
             self->outputs[i] = y;
@@ -251,53 +271,74 @@ static void Layer_feedForw_full(Layer* self)
 #if DEBUG_LAYER
     fprintf(stderr, "Layer_feedForw_full(Layer%d):\n", self->lid);
     fprintf(stderr, "  outputs = [");
-    for (int i = 0; i < self->nnodes; i++) {
+    for (int i = 0; i < out_size; i++) {
         fprintf(stderr, " %.4f", self->outputs[i]);
     }
     fprintf(stderr, "]\n  gradients = [");
-    for (int i = 0; i < self->nnodes; i++) {
+    for (int i = 0; i < out_size; i++) {
         fprintf(stderr, " %.4f", self->gradients[i]);
     }
     fprintf(stderr, "]\n");
 #endif
+
+    clock_t t1 = clock();  // <-- end timing
+    prof_feedforw_full_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    prof_feedforw_full_calls += 1;
 }
 
 static void Layer_feedBack_full(Layer* self)
 {
+    clock_t t0 = clock();  // start timing
+
     assert (self->ltype == LAYER_FULL);
     assert (self->lprev != NULL);
     Layer* lprev = self->lprev;
 
+    const int out_size = self->nnodes;
+    const int in_size = lprev->nnodes;
+
     /* Clear errors. */
     for (int j = 0; j < lprev->nnodes; j++) {
-        lprev->errors[j] = 0;
+        lprev->errors[j] = 0.0;
     }
 
-    int k = 0;
-    for (int i = 0; i < self->nnodes; i++) {
+    for (int i = 0; i < out_size; i++) {
         /* Computer the weight/bias updates. */
         double dnet = self->errors[i] * self->gradients[i];
-        for (int j = 0; j < lprev->nnodes; j++) {
+        const int w_base = i * in_size;
+
+        for (int j = 0; j < in_size; j++) {
+            int w_idx = w_base + j;
+            double wij = self->weights[w_idx];
             /* Propagate the errors to the previous layer. */
-            lprev->errors[j] += self->weights[k] * dnet;
-            self->u_weights[k] += dnet * lprev->outputs[j];
-            k++;
+            lprev->errors[j] += wij * dnet;
+            self->u_weights[w_idx] += dnet * lprev->outputs[j];
         }
         self->u_biases[i] += dnet;
     }
 
 #if DEBUG_LAYER
     fprintf(stderr, "Layer_feedBack_full(Layer%d):\n", self->lid);
-    for (int i = 0; i < self->nnodes; i++) {
+    for (int i = 0; i < out_size; i++) {
         double dnet = self->errors[i] * self->gradients[i];
         fprintf(stderr, "  dnet = %.4f, dw = [", dnet);
-        for (int j = 0; j < lprev->nnodes; j++) {
+        for (int j = 0; j < in_size; j++) {
             double dw = dnet * lprev->outputs[j];
             fprintf(stderr, " %.4f", dw);
         }
         fprintf(stderr, "]\n");
     }
 #endif
+
+    clock_t t1 = clock();  // end timing
+    prof_feedback_full_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    prof_feedback_full_calls += 1;
+}
+
+//helper to calculate accumulated i
+static inline int layer_index(const Layer* l, int z, int y, int x){
+    //將for(z) for(y) for(x) 裡面對應的i求出
+    return (z * l->height + y) * l->width + x;
 }
 
 /* Layer_feedForw_conv(self)
@@ -305,20 +346,27 @@ static void Layer_feedBack_full(Layer* self)
 */
 static void Layer_feedForw_conv(Layer* self)
 {
+    clock_t t0 = clock();  // start timing
+
     assert (self->ltype == LAYER_CONV);
     assert (self->lprev != NULL);
     Layer* lprev = self->lprev;
 
-    int kernsize = self->conv.kernsize;
+    const int kernsize = self->conv.kernsize;
+    const int stride = self->conv.stride;
+    const int padding = self->conv.padding;
+
     int i = 0;
     for (int z1 = 0; z1 < self->depth; z1++) {
         /* z1: dst matrix */
         /* qbase: kernel matrix base index */
         int qbase = z1 * lprev->depth * kernsize * kernsize;
+
         for (int y1 = 0; y1 < self->height; y1++) {
-            int y0 = self->conv.stride * y1 - self->conv.padding;
+            int y0 = stride * y1 - padding;
+
             for (int x1 = 0; x1 < self->width; x1++) {
-                int x0 = self->conv.stride * x1 - self->conv.padding;
+                int x0 = stride * x1 - padding;
                 /* Compute the kernel at (x1,y1) */
                 /* (x0,y0): src pixel */
                 double v = self->biases[z1];
@@ -326,11 +374,13 @@ static void Layer_feedForw_conv(Layer* self)
                     /* z0: src matrix */
                     /* pbase: src matrix base index */
                     int pbase = z0 * lprev->width * lprev->height;
+
                     for (int dy = 0; dy < kernsize; dy++) {
                         int y = y0+dy;
                         if (0 <= y && y < lprev->height) {
                             int p = pbase + y*lprev->width;
                             int q = qbase + dy*kernsize;
+
                             for (int dx = 0; dx < kernsize; dx++) {
                                 int x = x0+dx;
                                 if (0 <= x && x < lprev->width) {
@@ -342,13 +392,12 @@ static void Layer_feedForw_conv(Layer* self)
                 }
                 /* Apply the activation function. */
                 v = relu(v);
-                self->outputs[i] = v;
-                self->gradients[i] = relu_g(v);
-                i++;
+                int out_idx = layer_index(self, z1, y1, x1);
+                self->outputs[out_idx] = v;
+                self->gradients[out_idx] = relu_g(v);
             }
         }
     }
-    assert (i == self->nnodes);
 
 #if DEBUG_LAYER
     fprintf(stderr, "Layer_feedForw_conv(Layer%d):\n", self->lid);
@@ -362,10 +411,16 @@ static void Layer_feedForw_conv(Layer* self)
     }
     fprintf(stderr, "]\n");
 #endif
+
+    clock_t t1 = clock();  // end timing
+    prof_feedforw_conv_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    prof_feedforw_conv_calls += 1;
 }
 
 static void Layer_feedBack_conv(Layer* self)
 {
+    clock_t t0 = clock();  // start timing
+
     assert (self->ltype == LAYER_CONV);
     assert (self->lprev != NULL);
     Layer* lprev = self->lprev;
@@ -375,23 +430,29 @@ static void Layer_feedBack_conv(Layer* self)
         lprev->errors[j] = 0;
     }
 
-    int kernsize = self->conv.kernsize;
-    int i = 0;
+    const int kernsize = self->conv.kernsize;
+    const int stride = self->conv.stride;
+    const int padding = self->conv.padding;
+
     for (int z1 = 0; z1 < self->depth; z1++) {
         /* z1: dst matrix */
         /* qbase: kernel matrix base index */
         int qbase = z1 * lprev->depth * kernsize * kernsize;
+
         for (int y1 = 0; y1 < self->height; y1++) {
-            int y0 = self->conv.stride * y1 - self->conv.padding;
+            int y0 = stride * y1 - padding;
+
             for (int x1 = 0; x1 < self->width; x1++) {
-                int x0 = self->conv.stride * x1 - self->conv.padding;
+                int x0 = stride * x1 - padding;
                 /* Compute the kernel at (x1,y1) */
                 /* (x0,y0): src pixel */
-                double dnet = self->errors[i] * self->gradients[i];
+                int out_idx = layer_index(self, z1, y1, x1);
+                double dnet = self->errors[out_idx] * self->gradients[out_idx];
                 for (int z0 = 0; z0 < lprev->depth; z0++) {
                     /* z0: src matrix */
                     /* pbase: src matrix base index */
                     int pbase = z0 * lprev->width * lprev->height;
+
                     for (int dy = 0; dy < kernsize; dy++) {
                         int y = y0+dy;
                         if (0 <= y && y < lprev->height) {
@@ -408,11 +469,9 @@ static void Layer_feedBack_conv(Layer* self)
                     }
                 }
                 self->u_biases[z1] += dnet;
-                i++;
             }
         }
     }
-    assert (i == self->nnodes);
 
 #if DEBUG_LAYER
     fprintf(stderr, "Layer_feedBack_conv(Layer%d):\n", self->lid);
@@ -426,6 +485,10 @@ static void Layer_feedBack_conv(Layer* self)
         fprintf(stderr, "]\n");
     }
 #endif
+
+    clock_t t1 = clock();  // end timing
+    prof_feedback_conv_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    prof_feedback_conv_calls += 1;
 }
 
 /* Layer_setInputs(self, values)
@@ -606,4 +669,43 @@ Layer* Layer_create_conv(
     Layer_dump(self, stderr);
 #endif
     return self;
+}
+
+void Layer_print_profile(FILE *prof_log)
+{
+    fprintf(prof_log, "\n=== CNN profile (manual timing) ===\n");
+
+    if (prof_feedforw_conv_calls > 0) {
+        fprintf(prof_log,
+                "Layer_feedForw_conv : %ld calls, %.6f s total, %.9f s / call\n",
+                prof_feedforw_conv_calls,
+                prof_feedforw_conv_time,
+                prof_feedforw_conv_time / prof_feedforw_conv_calls);
+    }
+
+    if (prof_feedback_conv_calls > 0) {
+        fprintf(prof_log,
+                "Layer_feedBack_conv : %ld calls, %.6f s total, %.9f s / call\n",
+                prof_feedback_conv_calls,
+                prof_feedback_conv_time,
+                prof_feedback_conv_time / prof_feedback_conv_calls);
+    }
+
+    if (prof_feedforw_full_calls > 0) {
+        fprintf(prof_log,
+                "Layer_feedForw_full : %ld calls, %.6f s total, %.9f s / call\n",
+                prof_feedforw_full_calls,
+                prof_feedforw_full_time,
+                prof_feedforw_full_time / prof_feedforw_full_calls);
+    }
+
+    if (prof_feedback_full_calls > 0) {
+        fprintf(prof_log,
+                "Layer_feedBack_full : %ld calls, %.6f s total, %.9f s / call\n",
+                prof_feedback_full_calls,
+                prof_feedback_full_time,
+                prof_feedback_full_time / prof_feedback_full_calls);
+    }
+
+    fprintf(prof_log, "===================================\n");
 }

@@ -105,3 +105,5 @@ void Layer_learnOutputs(Layer* self, const double* values);
    Updates the weights.
 */
 void Layer_update(Layer* self, double rate);
+
+void Layer_print_profile(FILE *prof_log);

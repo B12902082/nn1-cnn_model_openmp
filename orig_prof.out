@@ -1,0 +1,11 @@
+
+=== CNN profile (manual timing) ===
+Layer_feedForw_conv : 1220000 calls, 197.614000 s total, 0.000161979 s / call
+Layer_feedBack_conv : 1200000 calls, 263.873000 s total, 0.000219894 s / call
+Layer_feedForw_full : 1830000 calls, 138.937000 s total, 0.000075922 s / call
+Layer_feedBack_full : 1800000 calls, 247.328000 s total, 0.000137404 s / call
+===================================
+
+real	14m20.356s
+user	0m0.154s
+sys	0m0.390s

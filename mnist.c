@@ -9,8 +9,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <string.h>
+
+#if defined(__APPLE__)
+#include <libkern/OSByteOrder.h>
+#define htobe32(x) OSSwapHostToBigInt32(x)
+#define be32toh(x) OSSwapBigToHostInt32(x)
+#else
 #include "my_endian.h"
+#endif
+
+#include <string.h>
 #include "cnn.h"
 
 
@@ -39,7 +47,7 @@ IdxFile* IdxFile_read(FILE* fp)
     } header;
     if (fread(&header, sizeof(header), 1, fp) != 1) return NULL;
 #if DEBUG_IDXFILE
-    fprintf(stderr, "IdxFile_read: magic=%x, type=%x, ndims=%u\n",
+    fprintf(train_log, "IdxFile_read: magic=%x, type=%x, ndims=%u\n",
             header.magic, header.type, header.ndims);
 #endif
     if (header.magic != 0) return NULL;
@@ -59,7 +67,7 @@ IdxFile* IdxFile_read(FILE* fp)
             /* Fix the byte order. */
             uint32_t size = be32toh(self->dims[i]);
 #if DEBUG_IDXFILE
-            fprintf(stderr, "IdxFile_read: size[%d]=%u\n", i, size);
+            fprintf(train_log, "IdxFile_read: size[%d]=%u\n", i, size);
 #endif
             nbytes *= size;
             self->dims[i] = size;
@@ -69,7 +77,7 @@ IdxFile* IdxFile_read(FILE* fp)
         if (self->data != NULL) {
             fread(self->data, sizeof(uint8_t), nbytes, fp);
 #if DEBUG_IDXFILE
-            fprintf(stderr, "IdxFile_read: read: %lu bytes\n", n);
+            fprintf(train_log, "IdxFile_read: read: %lu bytes\n", n);
 #endif
         }
     }
@@ -125,7 +133,11 @@ int main(int argc, char* argv[])
     /* argv[2] = train labels */
     /* argv[3] = test images */
     /* argv[4] = test labels */
-    if (argc < 4) return 100;
+    if (argc < 7) return 100;
+
+    // Open the output files
+    FILE *train_log = fopen(argv[5], "w"); // File 1: Training Output
+    FILE *prof_log  = fopen(argv[6], "w"); // File 2: Profiling Output
 
     /* Use a fixed random seed for debugging. */
     srand(0);
@@ -163,7 +175,7 @@ int main(int argc, char* argv[])
         fclose(fp);
     }
 
-    fprintf(stderr, "training...\n");
+    fprintf(train_log, "training...\n");
     double rate = 0.1;
     double etotal = 0;
     int nepoch = 10;
@@ -183,11 +195,11 @@ int main(int argc, char* argv[])
         Layer_getOutputs(loutput, y);
         int label = IdxFile_get1(labels_train, index);
 #if 0
-        fprintf(stderr, "label=%u, y=[", label);
+        fprintf(train_log, "label=%u, y=[", label);
         for (int j = 0; j < 10; j++) {
-            fprintf(stderr, " %.3f", y[j]);
+            fprintf(train_log, " %.3f", y[j]);
         }
-        fprintf(stderr, "]\n");
+        fprintf(train_log, "]\n");
 #endif
         for (int j = 0; j < 10; j++) {
             y[j] = (j == label)? 1 : 0;
@@ -199,7 +211,7 @@ int main(int argc, char* argv[])
             Layer_update(loutput, rate/batch_size);
         }
         if ((i % 1000) == 0) {
-            fprintf(stderr, "i=%d, error=%.4f\n", i, etotal/1000);
+            fprintf(train_log, "i=%d, error=%.4f\n", i, etotal/1000);
             etotal = 0;
         }
     }
@@ -235,7 +247,7 @@ int main(int argc, char* argv[])
         fclose(fp);
     }
 
-    fprintf(stderr, "testing...\n");
+    fprintf(train_log, "testing...\n");
     int ntests = images_test->dims[0];
     int ncorrect = 0;
     for (int i = 0; i < ntests; i++) {
@@ -260,13 +272,15 @@ int main(int argc, char* argv[])
             ncorrect++;
         }
         if ((i % 1000) == 0) {
-            fprintf(stderr, "i=%d\n", i);
+            fprintf(train_log, "i=%d\n", i);
         }
     }
-    fprintf(stderr, "ntests=%d, ncorrect=%d\n", ntests, ncorrect);
+    fprintf(train_log, "ntests=%d, ncorrect=%d\n", ntests, ncorrect);
 
     IdxFile_destroy(images_test);
     IdxFile_destroy(labels_test);
+
+    Layer_print_profile(prof_log);
 
     Layer_destroy(linput);
     Layer_destroy(lconv1);
