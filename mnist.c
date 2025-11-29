@@ -9,8 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <endian.h>
 #include <string.h>
+#include "my_endian.h"
 #include "cnn.h"
 
 
