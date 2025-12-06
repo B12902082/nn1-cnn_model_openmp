@@ -218,7 +218,7 @@ void Layer_dump(const Layer* self, FILE* fp)
 */
 static void Layer_feedForw_full(Layer* self)
 {
-    clock_t t0 = clock();  // <-- start timing
+    double t0 = omp_get_wtime();  // <-- start timing
 
     assert (self->ltype == LAYER_FULL);
     assert (self->lprev != NULL);
@@ -281,14 +281,14 @@ static void Layer_feedForw_full(Layer* self)
     fprintf(stderr, "]\n");
 #endif
 
-    clock_t t1 = clock();  // <-- end timing
-    prof_feedforw_full_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    double t1 = omp_get_wtime();  // <-- end timing
+    prof_feedforw_full_time  += t1 - t0;
     prof_feedforw_full_calls += 1;
 }
 
 static void Layer_feedBack_full(Layer* self)
 {
-    clock_t t0 = clock();  // start timing
+    double t0 = omp_get_wtime();  // start timing
 
     assert (self->ltype == LAYER_FULL);
     assert (self->lprev != NULL);
@@ -330,8 +330,8 @@ static void Layer_feedBack_full(Layer* self)
     }
 #endif
 
-    clock_t t1 = clock();  // end timing
-    prof_feedback_full_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    double t1 = omp_get_wtime();  // end timing
+    prof_feedback_full_time  += t1 - t0;
     prof_feedback_full_calls += 1;
 }
 
@@ -346,7 +346,7 @@ static inline int layer_index(const Layer* l, int z, int y, int x){
 */
 static void Layer_feedForw_conv(Layer* self)
 {
-    clock_t t0 = clock();  // start timing
+    double t0 = omp_get_wtime();  // start timing
 
     assert (self->ltype == LAYER_CONV);
     assert (self->lprev != NULL);
@@ -412,14 +412,14 @@ static void Layer_feedForw_conv(Layer* self)
     fprintf(stderr, "]\n");
 #endif
 
-    clock_t t1 = clock();  // end timing
-    prof_feedforw_conv_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    double t1 = omp_get_wtime();  // end timing
+    prof_feedforw_conv_time  += t1 - t0;
     prof_feedforw_conv_calls += 1;
 }
 
 static void Layer_feedBack_conv(Layer* self)
 {
-    clock_t t0 = clock();  // start timing
+    double t0 = omp_get_wtime();  // start timing
 
     assert (self->ltype == LAYER_CONV);
     assert (self->lprev != NULL);
@@ -438,16 +438,17 @@ static void Layer_feedBack_conv(Layer* self)
         /* z1: dst matrix */
         /* qbase: kernel matrix base index */
         int qbase = z1 * lprev->depth * kernsize * kernsize;
-
+        
         for (int y1 = 0; y1 < self->height; y1++) {
             int y0 = stride * y1 - padding;
-
+            
             for (int x1 = 0; x1 < self->width; x1++) {
                 int x0 = stride * x1 - padding;
                 /* Compute the kernel at (x1,y1) */
                 /* (x0,y0): src pixel */
                 int out_idx = layer_index(self, z1, y1, x1);
                 double dnet = self->errors[out_idx] * self->gradients[out_idx];
+                
                 for (int z0 = 0; z0 < lprev->depth; z0++) {
                     /* z0: src matrix */
                     /* pbase: src matrix base index */
@@ -458,6 +459,7 @@ static void Layer_feedBack_conv(Layer* self)
                         if (0 <= y && y < lprev->height) {
                             int p = pbase + y*lprev->width;
                             int q = qbase + dy*kernsize;
+
                             for (int dx = 0; dx < kernsize; dx++) {
                                 int x = x0+dx;
                                 if (0 <= x && x < lprev->width) {
@@ -486,8 +488,8 @@ static void Layer_feedBack_conv(Layer* self)
     }
 #endif
 
-    clock_t t1 = clock();  // end timing
-    prof_feedback_conv_time  += (double)(t1 - t0) / CLOCKS_PER_SEC;
+    double t1 = omp_get_wtime();  // end timing
+    prof_feedback_conv_time  += t1 - t0;
     prof_feedback_conv_calls += 1;
 }
 
